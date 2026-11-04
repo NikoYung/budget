@@ -9,6 +9,9 @@ const CURRENCY = '(?:₽|руб\\.?|р\\.|[РPрpЕE](?![а-яa-z]))';
 const AMOUNT_RE = new RegExp(`([+\\-−–—]\\s?)?(\\d{1,3}(?:[ \\u00a0]\\d{3})+|\\d+)(?:[.,](\\d{2}))?\\s?(${CURRENCY})?\\s*$`, 'i');
 
 const SKIP_RE = /(баланс|остаток|доступно|всего|итого|траты за|расходы за|доходы за|потрачено|операции|история|кредитн[а-яё]* лимит|на счет|кешбэк за|показать|фильтр|поиск)/i;
+// Счёт без знака — это баланс на главном экране банка, а не операция.
+const ACCOUNT_RE = /(счет|счёт|счета|карта|карты|вклад|копилк|накопительн)/i;
+const OWN_TRANSFER_RE = /(между сво|между счет|между счёт|своих счет|своих счёт|на накопительн|с накопительн|на вклад|со вклада|с вклада|копилк|на свой счет|на свой счёт)/i;
 const INCOME_RE = /(пополнени|зачислени|перевод от|входящ|зарплат|кешб[эе]к|кэшб[эе]к|возврат|от\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.)/i;
 const BANK_HINT_RE = /^(супермаркеты?|рестораны?|кафе|фастфуд|транспорт|такси|топливо|азс|аптеки?|здоровье|одежда|маркетплейсы?|развлечения|кино|связь|жкх|переводы?|пополнения?|супермаркет|различные товары|красота|дом и ремонт|образование|путешествия|другое|остальное|прочее|снятие наличных)(?![а-яё])/i;
 
@@ -76,15 +79,17 @@ const isNoise = (s) => s.length < 3 || !/[A-Za-zА-Яа-яЁё]{2}/.test(s) || /
 
 /**
  * @param lines строки OCR: строка или { text, conf }
- * @returns операции { date, amount, type, merchant, bankHint, doubts: string[] }
+ * @param startDate день, которым закончился предыдущий скриншот: строки до первого заголовка относятся к нему
+ * @returns операции { date, amount, type, merchant, bankHint, doubts: string[] }; date пустая, если дня не нашлось
  */
-export function parseStatement(lines, now = new Date()) {
+export function parseStatement(lines, now = new Date(), startDate = null) {
   const items = lines
     .map((l) => (typeof l === 'string' ? { text: clean(l), conf: 100 } : { text: clean(l.text), conf: l.conf ?? 100 }))
     .filter((l) => l.text);
 
   const ops = [];
-  let date = null;
+  let date = startDate;
+  let dateIsCarried = true; // дата ещё не подтверждена заголовком на этом скриншоте
   let pendingName = null; // последняя строка текста, ещё не ставшая названием
 
   items.forEach((item, i) => {
@@ -93,6 +98,7 @@ export function parseStatement(lines, now = new Date()) {
     const d = parseDateLine(text, now);
     if (d) {
       date = d;
+      dateIsCarried = false;
       pendingName = null;
       return;
     }
@@ -103,7 +109,7 @@ export function parseStatement(lines, now = new Date()) {
       else if (SKIP_RE.test(text)) pendingName = null;
       return;
     }
-    if (SKIP_RE.test(text)) {
+    if (SKIP_RE.test(text) || (!parsed.sign && ACCOUNT_RE.test(text))) {
       pendingName = null;
       return;
     }
@@ -128,19 +134,27 @@ export function parseStatement(lines, now = new Date()) {
     const lineConf = Math.min(conf, items[i - 1]?.conf ?? 100);
     if (conf < 75) doubts.push('сумма');
     else if (lineConf < 60) doubts.push('название');
-    if (!date) doubts.push('дата');
+    if (!date || dateIsCarried) doubts.push('дата');
     if (!merchant) doubts.push('название');
 
-    const isIncome = parsed.sign > 0 || (parsed.sign === 0 && INCOME_RE.test(`${merchant} ${bankHint}`));
+    const label = `${merchant} ${bankHint}`;
+    const isIncome = parsed.sign > 0 || (parsed.sign === 0 && INCOME_RE.test(label));
+    const isOwn = OWN_TRANSFER_RE.test(label);
 
     ops.push({
-      date: date || toISODate(now),
+      date: date || '',
       amount: parsed.amount,
-      type: isIncome ? 'income' : 'expense',
+      type: isOwn ? (isIncome ? 'transferIn' : 'transferOut') : isIncome ? 'income' : 'expense',
+      signed: parsed.sign !== 0,
       merchant,
       bankHint,
       doubts: [...new Set(doubts)],
     });
   });
+  // Если почти все суммы со знаком, строка без знака подозрительна.
+  const signed = ops.filter((o) => o.signed).length;
+  if (signed * 2 > ops.length) {
+    for (const o of ops) if (!o.signed) o.doubts.push('доход или расход');
+  }
   return ops;
 }

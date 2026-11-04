@@ -3,7 +3,8 @@ import { recognize } from './ocr.js';
 import { parseStatement } from './parser.js';
 import {
   uid, toISODate, monthKey, shiftMonth, monthTitle, dayTitle, formatRub, parseMoneyInput, kopToInput,
-  monthSummary, limitState, goalSaved, goalMonthly, merchantKey, markDuplicates, guessCategory, validateBackup,
+  monthSummary, limitState, goalSaved, totalSaved, goalMonthly, merchantKey, markDuplicates, guessCategory, validateBackup,
+  cardBalance, monthTotals, isTransfer,
 } from './logic.js';
 
 const BACKUP_REMIND_DAYS = 30;
@@ -15,6 +16,7 @@ const S = {
   categories: [],
   goals: [],
   rules: {},
+  anchor: null,
   lastBackup: null,
   query: '',
   historyCat: null,
@@ -43,6 +45,8 @@ function homeView() {
   const limited = S.categories.filter((c) => c.type === 'expense' && c.limit > 0 && !c.archived);
   const spent = [...sum.byCategory.entries()].map(([id, amount]) => ({ cat: catById(id), id, amount })).sort((a, b) => b.amount - a.amount);
   const max = spent[0]?.amount || 1;
+  const balance = cardBalance(S.anchor, S.transactions, S.goals);
+  const saved = totalSaved(S.goals);
   const daysSinceBackup = S.lastBackup ? (Date.now() - S.lastBackup) / 864e5 : Infinity;
 
   return `
@@ -54,12 +58,15 @@ function homeView() {
       <button data-act="month" data-d="1" aria-label="Следующий месяц" ${isCurrent ? 'disabled' : ''}>›</button>
     </div>
     <section class="card hero">
-      <div class="label">Осталось</div>
-      <div class="big ${sum.left < 0 ? 'neg' : ''}">${formatRub(sum.left)}</div>
+      <button class="hero-balance" data-act="balance-edit">
+        <span class="label">На карте ✎</span>
+        <span class="big ${balance < 0 ? 'neg' : ''}">${balance === null ? 'Указать баланс' : formatRub(balance)}</span>
+      </button>
+      <div class="note">Отложено ${formatRub(saved)}${balance === null ? '' : ` · всего ${formatRub(balance + saved)}`}</div>
       <div class="stats">
         <div><b>${formatRub(sum.income)}</b><span>Доходы</span></div>
         <div><b>${formatRub(sum.expense)}</b><span>Расходы</span></div>
-        <div><b>${formatRub(sum.saved)}</b><span>В цели</span></div>
+        <div><b>${formatRub(sum.net, { sign: sum.net > 0 })}</b><span>Итог месяца</span></div>
       </div>
     </section>
     <div class="row-btns">
@@ -121,11 +128,13 @@ function historyRows() {
 
 function txRow(t) {
   const c = catById(t.categoryId);
+  const plus = t.type === 'income' || t.type === 'transferIn';
+  const label = isTransfer(t) ? 'Перевод себе' : c?.name || 'Без категории';
   return `
     <button class="tx" data-act="edit" data-id="${esc(t.id)}">
-      <span class="em">${esc(c?.emoji || '❔')}</span>
-      <span class="mid"><div>${esc(t.merchant || c?.name || 'Без названия')}</div><div class="sub">${esc(c?.name || 'Без категории')}</div></span>
-      <span class="amt ${t.type === 'income' ? 'in' : ''}">${formatRub(t.type === 'income' ? t.amount : -t.amount, { sign: t.type === 'income' })}</span>
+      <span class="em">${isTransfer(t) ? '🔁' : esc(c?.emoji || '❔')}</span>
+      <span class="mid"><div>${esc(t.merchant || label)}</div><div class="sub">${esc(label)}</div></span>
+      <span class="amt ${t.type === 'income' ? 'in' : ''}">${formatRub(plus ? t.amount : -t.amount, { sign: plus })}</span>
     </button>`;
 }
 
@@ -182,6 +191,7 @@ function moreView() {
         <label class="btn">Восстановить<input type="file" accept=".json,application/json" data-change="restore"></label>
       </div>
     </section>
+    <button class="btn danger" data-act="wipe-tx">Удалить все операции</button>
     <p class="small muted" style="text-align:center">Операций: ${S.transactions.length}</p>`;
 }
 
@@ -207,12 +217,22 @@ function closeSheet() {
 function renderSheet() {
   const s = S.sheet;
   if (!s) return closeSheet();
-  const html = { tx: txSheet, goal: goalSheet, goalAdd: goalAddSheet, cat: catSheet, import: importSheet }[s.kind](s);
+  const html = { tx: txSheet, goal: goalSheet, goalAdd: goalAddSheet, cat: catSheet, import: importSheet, balance: balanceSheet }[s.kind](s);
   const full = s.kind === 'import';
   $('#sheet-root').innerHTML = `<div class="overlay" data-overlay><div class="sheet ${full ? 'full' : ''}" role="dialog" aria-modal="true">${html}</div></div>`;
 }
 
 const head = (title) => `<div class="sheet-head"><h2>${esc(title)}</h2><button class="close" data-act="close" aria-label="Закрыть">✕</button></div>`;
+
+function balanceSheet(s) {
+  return `
+    ${head('Баланс карты')}
+    <input class="input amount" inputmode="decimal" placeholder="0 ₽" value="${esc(s.amount)}" data-input="b-amount" aria-label="Баланс" autocomplete="off">
+    <p class="small muted">Введи сумму как в приложении банка, без отложенных денег. Дальше баланс считается от неё. Если разойдётся, просто сверь снова.</p>
+    <button class="btn primary" data-act="balance-save">Сохранить</button>`;
+}
+
+const TYPE_LABELS = { expense: 'Расход', income: 'Доход', transferOut: 'Перевод себе: списание', transferIn: 'Перевод себе: зачисление' };
 
 function txSheet(s) {
   const f = s.form;
@@ -220,12 +240,11 @@ function txSheet(s) {
   return `
     ${head(s.id ? 'Операция' : 'Новая операция')}
     ${s.id ? '' : '<label class="btn">📷 Загрузить скриншоты<input type="file" accept="image/*" multiple data-change="shots"></label>'}
-    <div class="seg">
-      <button data-act="tx-type" data-v="expense" class="${f.type === 'expense' ? 'on' : ''}">Расход</button>
-      <button data-act="tx-type" data-v="income" class="${f.type === 'income' ? 'on' : ''}">Доход</button>
+    <div class="seg two-rows">
+      ${['expense', 'income', 'transferOut', 'transferIn'].map((t) => `<button data-act="tx-type" data-v="${t}" class="${f.type === t ? 'on' : ''}">${t === 'transferOut' ? 'Себе: списание' : t === 'transferIn' ? 'Себе: зачисление' : TYPE_LABELS[t]}</button>`).join('')}
     </div>
     <input class="input amount" id="f-amount" inputmode="decimal" placeholder="0 ₽" value="${esc(f.amount)}" data-input="tx-amount" aria-label="Сумма" autocomplete="off">
-    <div class="chips">
+    <div class="chips" ${cats.length ? '' : 'hidden'}>
       ${cats.map((c) => `<button class="chip ${f.categoryId === c.id ? 'on' : ''}" data-act="tx-cat" data-id="${esc(c.id)}"><span class="e">${esc(c.emoji)}</span>${esc(c.name)}</button>`).join('')}
     </div>
     <div class="two">
@@ -242,9 +261,11 @@ function goalSheet(s) {
     ${head(s.id ? 'Цель' : 'Новая цель')}
     <label class="field">Название<input class="input" value="${esc(f.name)}" data-input="g-name" placeholder="Например, отпуск"></label>
     <div class="two">
-      <label class="field">Сумма<input class="input" inputmode="decimal" value="${esc(f.target)}" data-input="g-target" placeholder="100 000"></label>
+      <label class="field">Сумма цели<input class="input" inputmode="decimal" value="${esc(f.target)}" data-input="g-target" placeholder="100 000"></label>
       <label class="field">Срок<input class="input" type="date" value="${esc(f.deadline)}" min="${today()}" data-input="g-deadline"></label>
     </div>
+    <label class="field">Уже накоплено<input class="input" inputmode="decimal" value="${esc(f.initial)}" data-input="g-initial" placeholder="0"></label>
+    <p class="small muted">Эта сумма не вычитается с карты. Для новых денег используй «Пополнить».</p>
     <button class="btn primary" data-act="goal-save">Сохранить</button>
     ${s.id ? '<button class="btn danger" data-act="goal-delete">Удалить цель</button>' : ''}`;
 }
@@ -254,7 +275,7 @@ function goalAddSheet(s) {
   return `
     ${head(`Пополнить: ${g.name}`)}
     <input class="input amount" id="f-amount" inputmode="decimal" placeholder="0 ₽" data-input="ga-amount" aria-label="Сумма" autocomplete="off">
-    <p class="small muted">Сумма вычтется из «Осталось» за этот месяц.</p>
+    <p class="small muted">Сумма спишется с баланса карты и добавится к отложенному.</p>
     <button class="btn primary" data-act="goal-contribute">Отложить</button>`;
 }
 
@@ -287,9 +308,16 @@ function importSheet(s) {
   return `
     ${head('Проверь операции')}
     ${s.rows.length ? `<p class="small muted">Найдено: ${s.rows.length}. Выделенные рамкой стоит проверить внимательнее.</p>` : '<div class="empty">Операций не нашёл. Пришли этот скриншот, и я подстрою разбор под вёрстку банка.</div>'}
+    <div id="review-sum">${reviewSummary(s.rows)}</div>
     ${s.rows.map(reviewRow).join('')}
     ${s.rawText ? `<details><summary>Распознанный текст</summary><pre>${esc(s.rawText)}</pre></details>` : ''}
     <div class="sticky-foot"><button class="btn primary" style="width:100%" data-act="import-save" id="import-save" ${count ? '' : 'disabled'}>Добавить: ${count}</button></div>`;
+}
+
+function reviewSummary(rows) {
+  const parsed = rows.filter((r) => r.selected).map((r) => ({ ...r, amount: parseMoneyInput(r.amountText) }));
+  const lines = monthTotals(parsed).map((m) => `<div>${monthTitle(m.ym)}: расходы ${formatRub(m.expense)}, доходы ${formatRub(m.income)}</div>`);
+  return lines.length ? `<div class="card small"><b>Сверь с банком</b>${lines.join('')}</div>` : '';
 }
 
 const DUP_TEXT = {
@@ -309,8 +337,8 @@ function reviewRow(r, i) {
       <div class="rr-grid">
         <input class="input" inputmode="decimal" value="${esc(r.amountText)}" data-rowfield="amountText" aria-label="Сумма">
         <input class="input" type="date" value="${esc(r.date)}" data-rowfield="date" aria-label="Дата">
-        <select class="input" data-rowfield="type" aria-label="Тип"><option value="expense" ${r.type === 'expense' ? 'selected' : ''}>Расход</option><option value="income" ${r.type === 'income' ? 'selected' : ''}>Доход</option></select>
-        <select class="input" data-rowfield="categoryId" aria-label="Категория">${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === r.categoryId ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.name)}</option>`).join('')}</select>
+        <select class="input" data-rowfield="type" aria-label="Тип">${Object.entries(TYPE_LABELS).map(([v, l]) => `<option value="${v}" ${r.type === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        ${cats.length ? `<select class="input" data-rowfield="categoryId" aria-label="Категория">${cats.map((c) => `<option value="${esc(c.id)}" ${c.id === r.categoryId ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.name)}</option>`).join('')}</select>` : ''}
       </div>
       ${r.dup ? `<span class="tag">${DUP_TEXT[r.dup]}</span>` : ''}
       ${r.doubts.length ? `<span class="tag">Проверь: ${esc(r.doubts.join(', '))}</span>` : ''}
@@ -325,6 +353,7 @@ async function importShots(files) {
   openSheet(sheet);
   const found = [];
   const raw = [];
+  let carryDate = null;
   try {
     for (let i = 0; i < files.length; i++) {
       sheet.step = `Скриншот ${i + 1} из ${files.length}`;
@@ -336,7 +365,10 @@ async function importShots(files) {
       });
       if (S.sheet !== sheet) return; // шторку закрыли
       raw.push(text);
-      for (const op of parseStatement(lines)) found.push({ ...op, shot: i });
+      for (const op of parseStatement(lines, new Date(), carryDate)) {
+        found.push({ ...op, shot: i });
+        if (op.date) carryDate = op.date;
+      }
     }
   } catch (e) {
     console.error(e);
@@ -346,7 +378,7 @@ async function importShots(files) {
   }
   sheet.rows = markDuplicates(found, S.transactions).map((r) => {
     const guess = guessCategory(r, S.categories, S.rules);
-    return { ...r, amountText: kopToInput(r.amount), categoryId: guess.id, autoCategory: guess.id };
+    return { ...r, selected: r.selected && !!r.date, amountText: kopToInput(r.amount), categoryId: guess.id, autoCategory: guess.id };
   });
   sheet.rawText = raw.join('\n— — —\n');
   sheet.status = 'review';
@@ -361,7 +393,7 @@ async function saveImport() {
     if (!amount || !r.date) return toast(`Проверь сумму и дату: ${r.merchant || 'без названия'}`);
     items.push({ id: uid(), type: r.type, amount, categoryId: r.categoryId, date: r.date, merchant: r.merchant.trim(), source: 'screenshot', createdAt: Date.now() });
     const key = merchantKey(r.merchant);
-    if (key) S.rules[key] = r.categoryId;
+    if (key && r.categoryId) S.rules[key] = r.categoryId;
   }
   await db.putMany('transactions', items);
   await db.setMeta('rules', S.rules);
@@ -374,7 +406,7 @@ async function saveImport() {
 /* ---------- Резервная копия ---------- */
 
 async function exportBackup() {
-  const data = { app: 'budget', version: 1, exportedAt: new Date().toISOString(), transactions: S.transactions, categories: S.categories, goals: S.goals, rules: S.rules };
+  const data = { app: 'budget', version: 1, exportedAt: new Date().toISOString(), transactions: S.transactions, categories: S.categories, goals: S.goals, rules: S.rules, anchor: S.anchor };
   const name = `budget-${today()}.json`;
   const file = new File([JSON.stringify(data, null, 1)], name, { type: 'application/json' });
   let saved = true;
@@ -438,6 +470,27 @@ const actions = {
   },
   export: exportBackup,
 
+  'balance-edit'() {
+    const balance = cardBalance(S.anchor, S.transactions, S.goals);
+    openSheet({ kind: 'balance', amount: balance === null ? '' : kopToInput(Math.max(balance, 0)) });
+  },
+  async 'balance-save'() {
+    const amount = S.sheet.amount.trim() === '0' ? 0 : parseMoneyInput(S.sheet.amount);
+    if (amount === null) return toast('Введи сумму');
+    S.anchor = { amount, date: today(), at: Date.now() };
+    await db.setMeta('anchor', S.anchor);
+    closeSheet();
+    render();
+    toast('Баланс сверен');
+  },
+  async 'wipe-tx'() {
+    if (!confirm(`Удалить все операции (${S.transactions.length})? Категории, лимиты и цели останутся. Сначала лучше сохранить копию.`)) return;
+    await db.clearTransactions();
+    S.transactions = [];
+    render();
+    toast('Операции удалены');
+  },
+
   add() {
     const type = 'expense';
     openSheet({ kind: 'tx', id: null, form: { type, amount: '', categoryId: catsOf(type)[0]?.id, merchant: '', date: today() } });
@@ -466,7 +519,7 @@ const actions = {
     await db.put('transactions', item);
     S.transactions = [...S.transactions.filter((t) => t.id !== item.id), item];
     const key = merchantKey(item.merchant);
-    if (key && S.rules[key] !== item.categoryId) {
+    if (key && item.categoryId && S.rules[key] !== item.categoryId) {
       S.rules[key] = item.categoryId;
       await db.setMeta('rules', S.rules);
     }
@@ -483,11 +536,11 @@ const actions = {
   },
 
   'goal-new'() {
-    openSheet({ kind: 'goal', id: null, form: { name: '', target: '', deadline: '' } });
+    openSheet({ kind: 'goal', id: null, form: { name: '', target: '', deadline: '', initial: '' } });
   },
   'goal-edit'(el) {
     const g = S.goals.find((x) => x.id === el.dataset.id);
-    openSheet({ kind: 'goal', id: g.id, form: { name: g.name, target: kopToInput(g.target), deadline: g.deadline || '' } });
+    openSheet({ kind: 'goal', id: g.id, form: { name: g.name, target: kopToInput(g.target), deadline: g.deadline || '', initial: goalSaved(g) ? kopToInput(goalSaved(g)) : '' } });
   },
   'goal-add'(el) {
     openSheet({ kind: 'goalAdd', id: el.dataset.id, amount: '' });
@@ -497,8 +550,16 @@ const actions = {
     const target = parseMoneyInput(f.target);
     if (!f.name.trim()) return toast('Назови цель');
     if (!target) return toast('Введи сумму цели');
+    const initial = f.initial.trim() ? parseMoneyInput(f.initial) : 0;
+    if (initial === null) return toast('Проверь сумму «Уже накоплено»');
     const old = id && S.goals.find((g) => g.id === id);
+    // Правка накопленного заменяет взносы: это сверка, задним числом с карты ничего не списываем.
+    const changed = !old || initial !== goalSaved(old);
     const goal = { ...(old || { id: uid(), emoji: '🎯', contributions: [] }), name: f.name.trim(), target, deadline: f.deadline || null };
+    if (changed) {
+      goal.initial = initial;
+      goal.contributions = [];
+    }
     await db.put('goals', goal);
     S.goals = [...S.goals.filter((g) => g.id !== goal.id), goal];
     closeSheet();
@@ -515,7 +576,7 @@ const actions = {
     const amount = parseMoneyInput(S.sheet.amount);
     if (!amount) return toast('Введи сумму');
     const g = S.goals.find((x) => x.id === S.sheet.id);
-    g.contributions = [...(g.contributions || []), { date: today(), amount }];
+    g.contributions = [...(g.contributions || []), { date: today(), amount, at: Date.now() }];
     await db.put('goals', g);
     closeSheet();
     render();
@@ -578,6 +639,8 @@ const inputs = {
   'g-name': (el) => { S.sheet.form.name = el.value; },
   'g-target': (el) => { S.sheet.form.target = el.value; },
   'g-deadline': (el) => { S.sheet.form.deadline = el.value; },
+  'g-initial': (el) => { S.sheet.form.initial = el.value; },
+  'b-amount': (el) => { S.sheet.amount = el.value; },
   'ga-amount': (el) => { S.sheet.amount = el.value; },
   'c-emoji': (el) => { S.sheet.form.emoji = el.value; },
   'c-name': (el) => { S.sheet.form.name = el.value; },
@@ -604,6 +667,7 @@ document.addEventListener('input', (e) => {
   if (field) {
     const row = S.sheet.rows[+e.target.closest('[data-row]').dataset.row];
     row[field] = e.target.value;
+    if (field === 'amountText' || field === 'date') $('#review-sum').innerHTML = reviewSummary(S.sheet.rows);
     if (field === 'type') {
       row.categoryId = guessCategory(row, S.categories, S.rules).id;
       const y = $('.sheet').scrollTop;
@@ -631,14 +695,15 @@ document.addEventListener('change', (e) => {
     const btn = $('#import-save');
     btn.textContent = `Добавить: ${count}`;
     btn.disabled = !count;
+    $('#review-sum').innerHTML = reviewSummary(S.sheet.rows);
   }
 });
 
 /* ---------- Старт ---------- */
 
 async function loadAll() {
-  [S.transactions, S.categories, S.goals, S.rules, S.lastBackup] = await Promise.all([
-    db.getAll('transactions'), db.getAll('categories'), db.getAll('goals'), db.getMeta('rules').then((r) => r || {}), db.getMeta('lastBackup'),
+  [S.transactions, S.categories, S.goals, S.rules, S.lastBackup, S.anchor] = await Promise.all([
+    db.getAll('transactions'), db.getAll('categories'), db.getAll('goals'), db.getMeta('rules').then((r) => r || {}), db.getMeta('lastBackup'), db.getMeta('anchor'),
   ]);
 }
 

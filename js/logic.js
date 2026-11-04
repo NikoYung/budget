@@ -3,6 +3,9 @@
 export const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 export const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 
+export const isTransfer = (t) => t.type === 'transferIn' || t.type === 'transferOut';
+export const TX_TYPES = ['expense', 'income', 'transferOut', 'transferIn'];
+
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 export const pad2 = (n) => String(n).padStart(2, '0');
@@ -50,13 +53,14 @@ export function parseMoneyInput(str) {
 
 export const kopToInput = (kop) => (kop % 100 ? (kop / 100).toFixed(2).replace('.', ',') : String(kop / 100));
 
-/** Сводка месяца. Взносы в цели уменьшают «осталось»: эти деньги отложены. */
+/** Сводка месяца: доходы, расходы и взносы в цели. Переводы себе не считаются. */
 export function monthSummary(transactions, goals, ym) {
   let income = 0;
   let expense = 0;
   const byCategory = new Map();
   for (const t of transactions) {
     if (monthKey(t.date) !== ym) continue;
+    if (isTransfer(t)) continue; // перевод между своими счетами — не доход и не расход
     if (t.type === 'income') income += t.amount;
     else {
       expense += t.amount;
@@ -67,7 +71,7 @@ export function monthSummary(transactions, goals, ym) {
   for (const g of goals) {
     for (const c of g.contributions || []) if (monthKey(c.date) === ym) saved += c.amount;
   }
-  return { income, expense, saved, left: income - expense - saved, byCategory };
+  return { income, expense, saved, net: income - expense, byCategory };
 }
 
 /** Состояние лимита: ok до 80 %, warn до 100 %, over — превышен. */
@@ -76,7 +80,39 @@ export function limitState(spent, limit) {
   return { ratio, state: ratio > 1 ? 'over' : ratio >= 0.8 ? 'warn' : 'ok', left: limit - spent };
 }
 
-export const goalSaved = (g) => (g.contributions || []).reduce((s, c) => s + c.amount, 0);
+/** initial — деньги, которые уже были отложены; они не влияют на баланс карты. */
+export const goalSaved = (g) => (g.initial || 0) + (g.contributions || []).reduce((s, c) => s + c.amount, 0);
+export const totalSaved = (goals) => goals.reduce((s, g) => s + goalSaved(g), 0);
+
+const afterAnchor = (anchor, date, at) => date > anchor.date || (date === anchor.date && (at || 0) > anchor.at);
+
+/** Баланс карты: сверенная сумма плюс всё, что произошло после сверки. */
+export function cardBalance(anchor, transactions, goals) {
+  if (!anchor) return null;
+  let sum = anchor.amount;
+  for (const t of transactions) {
+    if (!afterAnchor(anchor, t.date, t.createdAt)) continue;
+    sum += t.type === 'income' || t.type === 'transferIn' ? t.amount : -t.amount;
+  }
+  for (const g of goals) {
+    for (const c of g.contributions || []) if (afterAnchor(anchor, c.date, c.at)) sum -= c.amount;
+  }
+  return sum;
+}
+
+/** Итоги выбранных строк по месяцам: их удобно сверить с приложением банка. */
+export function monthTotals(rows) {
+  const months = new Map();
+  for (const r of rows) {
+    if (!r.date || !r.amount || isTransfer(r)) continue;
+    const ym = monthKey(r.date);
+    const m = months.get(ym) || { ym, income: 0, expense: 0 };
+    if (r.type === 'income') m.income += r.amount;
+    else m.expense += r.amount;
+    months.set(ym, m);
+  }
+  return [...months.values()].sort((a, b) => b.ym.localeCompare(a.ym));
+}
 
 /** Сколько откладывать в месяц, чтобы успеть к сроку; null, если срока нет или цель закрыта. */
 export function goalMonthly(goal, today = toISODate(new Date())) {
@@ -148,6 +184,7 @@ export function markDuplicates(found, existing) {
 
 /** Категория для магазина: сначала выученные правила, затем подсказка банка, затем ключевые слова. */
 export function guessCategory({ merchant, bankHint, type }, categories, rules) {
+  if (type === 'transferIn' || type === 'transferOut') return { id: null, sure: true };
   const usable = categories.filter((c) => c.type === type && !c.archived);
   const key = merchantKey(merchant);
   if (key && rules[key] && usable.some((c) => c.id === rules[key])) return { id: rules[key], sure: true };
@@ -182,7 +219,7 @@ export function validateBackup(data) {
   if (!data || data.app !== 'budget' || !Array.isArray(data.transactions) || !Array.isArray(data.categories) || !Array.isArray(data.goals)) {
     throw new Error('Это не резервная копия бюджета');
   }
-  const okTx = data.transactions.every((t) => t.id && Number.isInteger(t.amount) && t.amount > 0 && /^\d{4}-\d{2}-\d{2}$/.test(t.date) && (t.type === 'income' || t.type === 'expense'));
+  const okTx = data.transactions.every((t) => t.id && Number.isInteger(t.amount) && t.amount > 0 && /^\d{4}-\d{2}-\d{2}$/.test(t.date) && TX_TYPES.includes(t.type));
   if (!okTx) throw new Error('В файле есть повреждённые операции');
   return data;
 }

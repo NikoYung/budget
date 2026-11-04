@@ -84,6 +84,10 @@ h1, h2, h3, p { margin: 0; }
 .hero .label { color: var(--ink-2); font-size: 14px; }
 .hero .big { font-size: 38px; font-weight: 700; letter-spacing: -.025em; line-height: 1.15; overflow-wrap: anywhere; }
 .hero .big.neg { color: var(--bad); }
+.hero-balance { display: block; width: 100%; text-align: left; }
+.hero-balance .label, .hero-balance .big { display: block; }
+.seg.two-rows { gap: 3px; }
+.seg.two-rows button { font-size: 14px; }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
 .stats b { display: block; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .stats span { font-size: 12px; color: var(--ink-2); }

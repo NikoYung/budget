@@ -1,5 +1,5 @@
 // Офлайн: оболочка кэшируется при установке, модуль распознавания — при первом использовании.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `budget-shell-${VERSION}`;
 const OCR_CACHE = 'budget-ocr-7.0.0'; // отдельно, чтобы обновления приложения не скачивали его заново
 

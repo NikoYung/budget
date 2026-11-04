@@ -51,6 +51,12 @@ export async function setMeta(key, value) {
   await done(tx);
 }
 
+export async function clearTransactions() {
+  const tx = db.transaction('transactions', 'readwrite');
+  tx.objectStore('transactions').clear();
+  await done(tx);
+}
+
 /** Полная замена данных одной транзакцией: при сбое старые данные останутся. */
 export async function replaceAll(data) {
   const tx = db.transaction(STORES, 'readwrite');
@@ -59,5 +65,6 @@ export async function replaceAll(data) {
     for (const item of data[s]) tx.objectStore(s).put(item);
   }
   tx.objectStore('meta').put(data.rules || {}, 'rules');
+  tx.objectStore('meta').put(data.anchor || null, 'anchor');
   await done(tx);
 }
