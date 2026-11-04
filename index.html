@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Бюджет</title>
+  <meta name="description" content="Личный учёт бюджета. Данные хранятся только на этом устройстве.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Бюджет">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#f4f5f2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141614" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <main id="view"></main>
+  <nav id="tabs" aria-label="Разделы">
+    <button data-act="tab" data-tab="home"><span class="ti">◉</span>Главная</button>
+    <button data-act="tab" data-tab="history"><span class="ti">≡</span>История</button>
+    <button data-act="add" class="fab" aria-label="Добавить операцию">+</button>
+    <button data-act="tab" data-tab="goals"><span class="ti">◎</span>Цели</button>
+    <button data-act="tab" data-tab="more"><span class="ti">⋯</span>Ещё</button>
+  </nav>
+  <div id="sheet-root"></div>
+  <div id="toast" role="status"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
